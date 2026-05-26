@@ -22,4 +22,4 @@ python -m training.main \
     --workers=1 \
     --seed 42 \
     --logs "../logs" \
-    --name "ViT_B_16-laion400m_teacher-marine-old-26"
+    --name "ViT_B_16-laion400m_teacher-marine-old-25"
