@@ -136,8 +136,77 @@ def get_grad(p, k, tau, targets):
     grad_k = (prob_targets_repeat * (p.t() / tau).unsqueeze(0)).sum(-1) / targets.size(0)
 
     return grad_p, grad_k
-     
-    
+
+
+class ClipLoss2(nn.Module):
+
+    def __init__(
+            self,
+            local_loss=False,
+            gather_with_grad=False,
+            cache_labels=False,
+            rank=0,
+            world_size=1,
+            use_horovod=False,
+    ):
+        super().__init__()
+        self.local_loss = local_loss
+        self.gather_with_grad = gather_with_grad
+        self.cache_labels = cache_labels
+        self.rank = rank
+        self.world_size = world_size
+        self.use_horovod = use_horovod
+
+        # Initialisation spécifique à SigLIP (Biais apprenable)
+        # Note : Dans SigLIP, logit_scale est souvent initialisé plus bas que CLIP (ex: autour de 10)
+        self.logit_bias = nn.Parameter(torch.ones([]) * -10.0)
+
+    def forward(self, image_features, text_features, logit_scale):
+        device = image_features.device
+        if self.world_size > 1:
+            all_image_features, all_text_features = gather_features(
+                image_features, text_features,
+                self.local_loss, self.gather_with_grad, self.rank, self.world_size, self.use_horovod)
+
+            # Normalisation essentielle pour la stabilité avec la sigmoïde
+            all_image_features = F.normalize(all_image_features, dim=1)
+            all_text_features = F.normalize(all_text_features, dim=1)
+            image_features = F.normalize(image_features, dim=1)
+            text_features = F.normalize(text_features, dim=1)
+
+            if self.local_loss:
+                logits_per_image = logit_scale * image_features @ all_text_features.T + self.logit_bias
+            else:
+                logits_per_image = logit_scale * all_image_features @ all_text_features.T + self.logit_bias
+        else:
+            image_features = F.normalize(image_features, dim=1)
+            text_features = F.normalize(text_features, dim=1)
+            logits_per_image = logit_scale * image_features @ text_features.T + self.logit_bias
+
+        num_logits = logits_per_image.shape[0]
+
+        # --- BLOC DE LOGIQUE SIGLIP ---
+        # 1. Création de la matrice cible (1 sur la diagonale, -1 partout ailleurs)
+        # Si local_loss et multi-GPU sont activés, la diagonale est décalée selon le rang
+        if self.world_size > 1 and self.local_loss:
+            # Matrice rectangulaire [N_local, N_global]
+            labels = torch.eye(logits_per_image.shape[0], all_text_features.shape[0], device=device)
+            # Décalage de l'identité pour correspondre aux index globaux du processus local
+            labels = torch.roll(labels, shifts=num_logits * self.rank, dims=1)
+        else:
+            # Cas standard : Matrice carrée [N, N]
+            labels = torch.eye(num_logits, device=device)
+
+        # On transforme la matrice de [0, 1] à [-1, 1]
+        labels = 2.0 * labels - 1.0
+
+        # 2. Calcul de la perte Sigmoïde binaire paire par paire
+        # Formule : -log(sigmoid(w * sim + b)) pour les positifs, -log(sigmoid(-(w * sim + b))) pour les négatifs
+        # En PyTorch, F.logsigmoid(x * labels) fait exactement cela de manière numériquement stable !
+        total_loss = -F.logsigmoid(logits_per_image * labels).sum() / num_logits
+
+        return total_loss
+
 class ClipLoss(nn.Module):
 
     def __init__(
@@ -196,18 +265,19 @@ class ClipLoss(nn.Module):
         return total_loss
 
 
-    
 class DistillKL(nn.Module):
     """Distilling the Knowledge in a Neural Network"""
+
     def __init__(self, T):
         super(DistillKL, self).__init__()
         self.T = T
 
     def forward(self, y_s, y_t):
-        p_s = F.log_softmax(y_s/self.T, dim=1)
-        p_t = F.softmax(y_t/self.T, dim=1)
-        loss = F.kl_div(p_s, p_t, reduction='batchmean') * (self.T**2)
+        p_s = F.log_softmax(y_s / self.T, dim=1)
+        p_t = F.softmax(y_t / self.T, dim=1)
+        loss = F.kl_div(p_s, p_t, reduction='batchmean') * (self.T ** 2)
         return loss
+
 
 class KDClipLoss(nn.Module):
 
@@ -233,11 +303,11 @@ class KDClipLoss(nn.Module):
         if args.t_embed_dim != args.s_embed_dim:
             self.visual_proj = nn.Linear(args.s_embed_dim, args.t_embed_dim)
             self.text_proj = nn.Linear(args.s_embed_dim, args.t_embed_dim)
-        
+
         if args.alpha_afd_loss > 0.:
-            self.visual_fusion_proj = nn.Linear(args.s_embed_dim+args.t_embed_dim, args.s_embed_dim)
-            self.text_fusion_proj = nn.Linear(args.s_embed_dim+args.t_embed_dim, args.s_embed_dim)
-            
+            self.visual_fusion_proj = nn.Linear(args.s_embed_dim + args.t_embed_dim, args.s_embed_dim)
+            self.text_fusion_proj = nn.Linear(args.s_embed_dim + args.t_embed_dim, args.s_embed_dim)
+
         # cache state
         self.prev_num_logits = 0
         self.kl_loss = DistillKL(T=1)
@@ -246,8 +316,10 @@ class KDClipLoss(nn.Module):
         self.labels = {}
 
     def forward(self, image_features, text_features, logit_scale, \
-        t_image_features, t_text_features, t_logit_scale):
+                t_image_features, t_text_features, t_logit_scale):
         device = image_features.device
+        normalized_image_features = F.normalize(image_features, dim=1)
+        normalized_text_features = F.normalize(text_features, dim=1)
         if self.world_size > 1:
             all_image_features, all_text_features = gather_features(
                 image_features, text_features,
@@ -263,7 +335,7 @@ class KDClipLoss(nn.Module):
             normalized_text_features = F.normalize(text_features, dim=1)
             normalized_all_image_features = F.normalize(all_image_features, dim=1)
             normalized_all_text_features = F.normalize(all_text_features, dim=1)
-            
+
             if self.local_loss:
                 logits_per_image = logit_scale * normalized_image_features @ normalized_all_text_features.T
                 logits_per_text = logit_scale * normalized_text_features @ normalized_all_image_features.T
@@ -271,8 +343,16 @@ class KDClipLoss(nn.Module):
                 logits_per_image = logit_scale * normalized_all_image_features @ normalized_all_text_features.T
                 logits_per_text = logits_per_image.T
         else:
-            logits_per_image = logit_scale * normalized_image_features @ normalized_text_features.T
-            logits_per_text = logit_scale * normalized_text_features @ normalized_image_features.T
+            all_image_features = image_features
+            all_text_features = text_features
+            normalized_all_image_features = normalized_image_features
+            normalized_all_text_features = normalized_text_features
+            t_all_image_features = F.normalize(t_image_features, dim=1)
+            t_all_text_features = F.normalize(t_text_features, dim=1)
+            t_logits_per_image = t_logit_scale * t_all_image_features @ t_all_text_features.T
+            t_logits_per_text = t_logits_per_image.T
+            logits_per_image = logit_scale * normalized_all_image_features @ normalized_all_text_features.T
+            logits_per_text = logits_per_image.T
 
         # calculated ground-truth and cache if enabled
         num_logits = logits_per_image.shape[0]
@@ -289,53 +369,54 @@ class KDClipLoss(nn.Module):
         if self.args.t_embed_dim != self.args.s_embed_dim:
             all_image_features = self.visual_proj(all_image_features)
             all_text_features = self.text_proj(all_text_features)
-            
+
         normalized_all_image_features = F.normalize(all_image_features, dim=1)
         normalized_all_text_features = F.normalize(all_text_features, dim=1)
-        fd_loss = F.mse_loss(normalized_all_image_features, t_all_image_features) +\
-            F.mse_loss(normalized_all_text_features, t_all_text_features)
-            
+        fd_loss = F.mse_loss(normalized_all_image_features, t_all_image_features) + \
+                  F.mse_loss(normalized_all_text_features, t_all_text_features)
+
         logits_per_s_image_to_t_text = self.cross_logit_scale * normalized_all_image_features @ t_all_text_features.T
         logits_per_s_text_to_t_image = self.cross_logit_scale * normalized_all_text_features @ t_all_image_features.T
-        
+
         task_loss = (
-            F.cross_entropy(logits_per_image, labels) +
-            F.cross_entropy(logits_per_text, labels)
-            ) / 2
-        
-        ckd_loss = torch.tensor(0.).cuda() 
-        icl_loss = torch.tensor(0.).cuda() 
-        cross_kd_loss = torch.tensor(0.).cuda() 
-        gd_loss = torch.tensor(0.).cuda() 
-        afd_loss = torch.tensor(0.).cuda() 
-        
+                            F.cross_entropy(logits_per_image, labels) +
+                            F.cross_entropy(logits_per_text, labels)
+                    ) / 2
+
+        ckd_loss = torch.tensor(0.).to(device)
+        icl_loss = torch.tensor(0.).to(device)
+        cross_kd_loss = torch.tensor(0.).to(device)
+        gd_loss = torch.tensor(0.).to(device)
+        afd_loss = torch.tensor(0.).to(device)
+
         icl_loss = (
-            F.cross_entropy(logits_per_s_image_to_t_text, labels) +
-            F.cross_entropy(logits_per_s_text_to_t_image, labels)
-            ) / 2
-        
-        ckd_loss = (self.kl_loss(logits_per_image, t_logits_per_image.detach()) +\
-            self.kl_loss(logits_per_text, t_logits_per_text.detach())) / 2
-        
-        cross_kd_loss = (self.kl_loss(logits_per_s_image_to_t_text, t_logits_per_image.detach()) +\
-            self.kl_loss(logits_per_s_text_to_t_image, t_logits_per_text.detach())) / 2
-        #kd_loss = (F.cross_entropy(logits_per_image, F.softmax(, dim=1)) \
+                           F.cross_entropy(logits_per_s_image_to_t_text, labels) +
+                           F.cross_entropy(logits_per_s_text_to_t_image, labels)
+                   ) / 2
+
+        ckd_loss = (self.kl_loss(logits_per_image, t_logits_per_image.detach()) + \
+                    self.kl_loss(logits_per_text, t_logits_per_text.detach())) / 2
+
+        cross_kd_loss = (self.kl_loss(logits_per_s_image_to_t_text, t_logits_per_image.detach()) + \
+                         self.kl_loss(logits_per_s_text_to_t_image, t_logits_per_text.detach())) / 2
+        # kd_loss = (F.cross_entropy(logits_per_image, F.softmax(, dim=1)) \
         #    + F.cross_entropy(logits_per_text, F.softmax(t_logits_per_text.detach(), dim=1))) / 2
-        
-        
+
         if self.args.alpha_gd_loss > 0.:
             with torch.no_grad():
                 t_grad_p_img, t_grad_k_txt = get_grad(t_all_image_features, t_all_text_features, t_logit_scale, labels)
                 t_grad_p_txt, t_grad_k_img = get_grad(t_all_text_features, t_all_image_features, t_logit_scale, labels)
-            
-            s_grad_p_img, s_grad_k_txt = get_grad(normalized_all_image_features, normalized_all_text_features, logit_scale, labels)
-            s_grad_p_txt, s_grad_k_img = get_grad(normalized_all_text_features, normalized_all_image_features, logit_scale, labels)
 
-            gd_loss = F.mse_loss(s_grad_p_img, t_grad_p_img.detach()) +\
-                F.mse_loss(s_grad_k_txt, t_grad_k_txt.detach()) +\
-                    F.mse_loss(s_grad_p_txt, t_grad_p_txt.detach()) +\
-                        F.mse_loss(s_grad_k_img, t_grad_k_img.detach()) 
-        
+            s_grad_p_img, s_grad_k_txt = get_grad(normalized_all_image_features, normalized_all_text_features,
+                                                  logit_scale, labels)
+            s_grad_p_txt, s_grad_k_img = get_grad(normalized_all_text_features, normalized_all_image_features,
+                                                  logit_scale, labels)
+
+            gd_loss = F.mse_loss(s_grad_p_img, t_grad_p_img.detach()) + \
+                      F.mse_loss(s_grad_k_txt, t_grad_k_txt.detach()) + \
+                      F.mse_loss(s_grad_p_txt, t_grad_p_txt.detach()) + \
+                      F.mse_loss(s_grad_k_img, t_grad_k_img.detach())
+
         if self.args.alpha_afd_loss > 0.:
             img_fusion_feat = torch.cat([normalized_all_image_features, t_all_image_features], dim=1)
             txt_fusion_feat = torch.cat([normalized_all_text_features, t_all_text_features], dim=1)
@@ -343,20 +424,19 @@ class KDClipLoss(nn.Module):
             txt_fusion_feat = self.text_fusion_proj(txt_fusion_feat)
             img_fusion_feat = F.normalize(img_fusion_feat, dim=1)
             txt_fusion_feat = F.normalize(txt_fusion_feat, dim=1)
-            
+
             logits_per_fusion_image = self.fusion_logit_scale * img_fusion_feat @ txt_fusion_feat.T
             logits_per_fusion_text = logits_per_fusion_image.T
             afd_loss = (
-                F.cross_entropy(logits_per_fusion_image, labels) +
-                F.cross_entropy(logits_per_fusion_text, labels)
-            ) / 2
-            
-            
+                               F.cross_entropy(logits_per_fusion_image, labels) +
+                               F.cross_entropy(logits_per_fusion_text, labels)
+                       ) / 2
+
         ckd_loss = self.args.alpha_ckd_loss * ckd_loss
         icl_loss = self.args.alpha_icl_loss * icl_loss
         cross_kd_loss = self.args.alpha_cross_kd_loss * cross_kd_loss
         fd_loss = self.args.alpha_fd_loss * fd_loss
         gd_loss = self.args.alpha_gd_loss * gd_loss
         afd_loss = self.args.alpha_afd_loss * afd_loss
-        
+
         return task_loss, ckd_loss, icl_loss, cross_kd_loss, fd_loss, gd_loss, afd_loss

@@ -11,6 +11,13 @@ from torch import optim
 from torch.cuda.amp import GradScaler
 from open_clip import ClipLoss, KDClipLoss, get_cast_dtype
 
+# Tes autorisations actuelles
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+torch.serialization.add_safe_globals([np.dtype])
+
+# AJOUTE CETTE LIGNE ICI :
+torch.serialization.add_safe_globals([np.dtypes.Float64DType])
+
 try:
     import wandb
 except ImportError:
@@ -182,14 +189,35 @@ def main(args):
             ddp_args['static_graph'] = True
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
 
+    #t_model.eval()
+    #for t_n, t_p in t_model.named_parameters():
+    #    t_p.requires_grad = False
+    #checkpoint = torch.load(args.t_model_checkpoint, map_location='cpu')
+    #sd = checkpoint
+    ##sd = checkpoint["state_dict"]
+    #if next(iter(sd.items()))[0].startswith('module'):
+    #    sd = {k[len('module.'):]: v for k, v in sd.items()}
+    #t_model.load_state_dict(sd)
+    #print('Teacher model loaded successfully')
+
     t_model.eval()
     for t_n, t_p in t_model.named_parameters():
         t_p.requires_grad = False
+
+    # 1. Chargement sécurisé du fichier
     checkpoint = torch.load(args.t_model_checkpoint, map_location='cpu')
-    sd = checkpoint
-    #sd = checkpoint["state_dict"]
-    if next(iter(sd.items()))[0].startswith('module'):
+
+    # 2. Extraction sécurisée des poids (state_dict) s'il s'agit d'un checkpoint complet
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        sd = checkpoint["state_dict"]
+    else:
+        sd = checkpoint
+
+    # 3. Nettoyage du préfixe 'module.' (indispensable si le modèle a été entraîné en multi-GPU DDP)
+    if next(iter(sd.items()))[0].startswith('module.'):
         sd = {k[len('module.'):]: v for k, v in sd.items()}
+
+    # 4. Chargement final dans le modèle enseignant
     t_model.load_state_dict(sd)
     print('Teacher model loaded successfully')
     
@@ -200,8 +228,8 @@ def main(args):
         cache_labels=True,
         rank=args.rank,
         world_size=args.world_size,
-        use_horovod=args.horovod).cuda()
-    
+        use_horovod=args.horovod).to(device=device)
+    # use_horovod=args.horovod).cuda()
     # create optimizer and scaler
     optimizer = None
     scaler = None
