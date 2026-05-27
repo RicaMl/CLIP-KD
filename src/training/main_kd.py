@@ -11,11 +11,9 @@ from torch import optim
 from torch.cuda.amp import GradScaler
 from open_clip import ClipLoss, KDClipLoss, get_cast_dtype
 
-# Tes autorisations actuelles
 torch.serialization.add_safe_globals([np._core.multiarray.scalar])
 torch.serialization.add_safe_globals([np.dtype])
 
-# AJOUTE CETTE LIGNE ICI :
 torch.serialization.add_safe_globals([np.dtypes.Float64DType])
 
 try:

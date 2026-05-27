@@ -158,7 +158,7 @@ class ClipLoss2(nn.Module):
         self.use_horovod = use_horovod
 
         # Initialisation spécifique à SigLIP (Biais apprenable)
-        # Note : Dans SigLIP, logit_scale est souvent initialisé plus bas que CLIP (ex: autour de 10)
+        # Dans SigLIP, logit_scale est souvent initialisé plus bas que CLIP
         self.logit_bias = nn.Parameter(torch.ones([]) * -10.0)
 
     def forward(self, image_features, text_features, logit_scale):
@@ -168,7 +168,7 @@ class ClipLoss2(nn.Module):
                 image_features, text_features,
                 self.local_loss, self.gather_with_grad, self.rank, self.world_size, self.use_horovod)
 
-            # Normalisation essentielle pour la stabilité avec la sigmoïde
+            # Normalisation  pour la stabilité avec la sigmoïde
             all_image_features = F.normalize(all_image_features, dim=1)
             all_text_features = F.normalize(all_text_features, dim=1)
             image_features = F.normalize(image_features, dim=1)
@@ -185,8 +185,8 @@ class ClipLoss2(nn.Module):
 
         num_logits = logits_per_image.shape[0]
 
-        # --- BLOC DE LOGIQUE SIGLIP ---
-        # 1. Création de la matrice cible (1 sur la diagonale, -1 partout ailleurs)
+        # BLOC DE LOGIQUE SIGLIP
+        # Création de la matrice cible (1 sur la diagonale, -1 partout ailleurs)
         # Si local_loss et multi-GPU sont activés, la diagonale est décalée selon le rang
         if self.world_size > 1 and self.local_loss:
             # Matrice rectangulaire [N_local, N_global]

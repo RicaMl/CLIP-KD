@@ -9,6 +9,11 @@ import torch
 from torch import optim
 from torch.cuda.amp import GradScaler
 
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+torch.serialization.add_safe_globals([np.dtype])
+
+torch.serialization.add_safe_globals([np.dtypes.Float64DType])
+
 try:
     import wandb
 except ImportError:

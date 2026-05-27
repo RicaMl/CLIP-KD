@@ -1,261 +1,225 @@
-# CLIP-KD — Distillation de connaissances sur domaine marin (FathomNet)
+# CLIP-KD : Distillation de connaissances pour CLIP sur le domaine marin
 
-> Travail d'Étude et de Recherche (TER) — Master 1 Vision et Machine Intelligente  
-> Université Paris Cité — 2025/2026  
-> **Auteurs :** Rica Mouele Yandza Itotoba, Azouaou Zouaoui
+Ce dépôt contient l’implémentation et les expérimentations réalisées dans le cadre d’un TER (Master 1 VMI, Université Paris Cité). L’objectif est d’étudier la distillation de connaissances (Knowledge Distillation) du modèle CLIP sur un jeu de données d’images sous‑marines (FathomNet), afin d’obtenir un modèle étudiant plus compact tout en conservant de bonnes performances en retrieval image‑texte.
 
----
+## Contexte
 
-## Présentation
+CLIP (Contrastive Language-Image Pre-training) est un modèle de vision‑langage qui aligne images et descriptions textuelles dans un espace commun. La distillation de connaissances permet de transférer les connaissances d’un grand modèle enseignant (teacher) vers un modèle plus petit (student), réduisant ainsi le coût en mémoire et en calcul.
 
-Ce dépôt contient le code et les expériences réalisées dans le cadre d'une étude empirique de la distillation de connaissances appliquée au modèle CLIP sur un dataset d'images marines issues de la base [FathomNet](https://fathomnet.org). Il s'appuie sur l'implémentation de référence [CLIP-KD](https://github.com/winycg/CLIP-KD).
+Dans ce projet, nous utilisons :
+- **Teacher** : ViT-B/16 fine‑tuné sur le dataset marin FathomNet.
+- **Student** : RN50 (initialisé par OpenAI ou pré‑distillé) et d’autres architectures (ViT-T-16, etc.).
+- **Stratégies de distillation** : FD (Feature Distillation), ICL (Interactive Contrastive Learning), CRD, MFD, AFD, GD – avec combinaison optimale `FD + ICL + CKD`.
 
-L'objectif est triple :
-1. Tester les différentes stratégies de distillation proposées dans l'article CLIP-KD (FD, MFD, CRD, GD, ICL, AFD)
-2. Investiguer des adaptations spécifiques au domaine marin (hyperparamètres, captions, nettoyage de données)
-3. Évaluer les performances en classification zero-shot sur les données marines
+## Données
 
----
+Le jeu de données est issu de l’API [FathomNet](https://fathomnet.org/) : images sous‑marines d’espèces variées, nettoyées des doublons et des artefacts (bruit, padding figé).  
+- **Train** : 350 images uniques  
+- **Validation** : 39 images  
+- **Test zero‑shot** : 14 espèces non vues à l’entraînement.
 
-## Structure du projet
-
-```
-CLIP-KD/
-├── src/
-│   └── training/
-│       ├── main.py            # Entraînement standard (teacher)
-│       ├── main_kd.py         # Entraînement avec distillation (student)
-│       └── ...
-├── csvfiles/
-│   ├── train/
-│   │   └── captions_train_new-2.csv
-│   └── val/
-│       └── captions_val_new-2.csv
-├── pretrained_models/
-│   ├── ViT_B_16-laion400m_e32.pt
-│   ├── ViT_B_16-laion400m_teacher-marine_e15.pt
-│   ├── RN50_cc3m_12m_ep32.pt
-│   ├── ViT_B_16_laion400m_kd_RN50_cc3m_12m_ep32.pt
-│   └── ViT_B_16_laion400m_kd_ViT_T_16_cc3m_12m_ep32.pt
-├── logs/
-├── scripts/
-│   ├── train_teacher.sh
-│   └── train_student.sh
-└── README.md
-```
-
----
-
-## Dataset
-
-Le dataset est composé d'images sous-marines annotées issues de l'API FathomNet :
-
-- **Train :** 350 images natives (après nettoyage des duplicatas et des augmentations figées)
-- **Val :** 39 images
-- **Format :** CSV avec colonnes `filepath` et `caption`
-
-### Récupération des images
-
-Les images originales ont été récupérées directement via l'API FathomNet pour éliminer le bruit gaussien et les augmentations pré-calculées présentes dans le dataset initial. Les augmentations sont appliquées **exclusivement à la volée** pendant l'entraînement :
-
-```python
-RandomResizedCrop(image_size, scale=(0.9, 1.0), interpolation=InterpolationMode.BICUBIC),
-RandomHorizontalFlip(p=0.5),
-RandomVerticalFlip(p=0.5),
-RandomApply([GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0))], p=0.3),
-ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2)
-```
-
-### Captions
-
-Deux versions de captions ont été générées via un VLM :
-
-| Version | Description | Résultat |
-|---|---|---|
-| V1 | Few-shot avec exemple fixe, structure syntaxique rigide | Shortcut learning, mauvaise généralisation |
-| **V2** | **Few-shot libre, descriptions variées et riches** | **Meilleure généralisation, retenu pour les expériences** |
-
----
-
-## Modèles
-
-### Modèle enseignant (Teacher)
-
-| Paramètre | Valeur |
-|---|---|
-| Architecture | ViT-B/16 |
-| Checkpoint de départ | `ViT_B_16-laion400m_e32.pt` |
-| Checkpoint final | `ViT_B_16-laion400m_teacher-marine_e15.pt` (epoch 13) |
-| R@1 I→T (epoch 13) | 51.28% |
-| R@10 T→I (epoch 13) | 100.00% |
-| Loss val (epoch 13) | 0.508 |
-
-### Modèles étudiants (Students) testés
-
-| Checkpoint | Architecture | R@1 max | Loss val min |
-|---|---|---|---|
-| `RN50_cc3m_12m_ep32` | RN50 | 25.6% | 1.381 |
-| **`ViT_B_16_laion400m_kd_RN50_cc3m_12m_ep32`** | **RN50** | **28.2%** | **1.462** |
-| `ViT_B_16_laion400m_kd_ViT_T_16_cc3m_12m_ep32` | ViT-T/16 | 20.5% | 1.554 |
-| `ViT_B_16_laion400m_e32` | ViT-B/16 | 15.4% | 1.658 |
-
-Le **RN50 pré-distillé KD** est retenu comme meilleur étudiant sur l'ensemble des métriques.
-
----
+Deux versions de captions (descriptions textuelles) ont été générées par un VLM :
+- **Version 1** : structure rigide (few‑shot fixe) → encourage le *shortcut learning*.
+- **Version 2** : descriptions libres et diversifiées → meilleure généralisation.
 
 ## Installation
 
-```bash
-git clone https://github.com/winycg/CLIP-KD.git
-cd CLIP-KD
-pip install -r requirements.txt
+1. **Cloner le dépôt**
+   ```bash
+   git clone https://github.com/RicaMl/CLIP-KD.git
+   cd CLIP-KD
+   ```
+
+2. **Créer un environnement virtuel (Python 3.10 recommandé)**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate   # Linux/Mac
+   # ou venv\Scripts\activate sous Windows
+   ```
+
+3. **Installer les dépendances**
+   ```bash
+   pip install -r requirement.txt
+   ```
+
+   Le code a été testé avec PyTorch 2.0+ et MPS (Mac). Pour GPU CUDA, ajustez l’argument `--device`.
+
+4. **Télécharger les checkpoints pré‑entraînés**
+   - Modèle enseignant final (`ViT_B_16-laion400m_teacher-marine_e15.pt`) : https://github.com/winycg/CLIP-KD
+   - Checkpoints étudiants (RN50 OpenAI, RN50 pré‑distillé, ViT-T-16 pré‑distillé, etc.)
+   - Placez‑les dans le dossier `pretrained_models/`.
+
+## Structure du code
+
+```
+CLIP-KD/
+├── script/                       # Scripts d’entraînement et de distillation et d'evaluation zero shot
+├── training/                     
+│   ├── main.py                   # Fine‑tuning du teacher
+│   ├── main_kd.py                # Distillation du teacher vers le student
+│   └── zero_shot_fathomnet_custom_v2.py  # Évaluation cross‑modal zero‑shot retrieval
+├── csvfiles/                     # Fichiers CSV (train/val captions)
+│   ├── train/
+│   ├── val/
+│   └── zero-shot/
+├── logs/                         # TensorBoard logs et résultats
+├── pretrained_models/            # Checkpoints (.pt)
+└── README.md
 ```
 
-Placer les checkpoints pré-entraînés dans `pretrained_models/`. Les checkpoints OpenCLIP sont disponibles sur [Hugging Face](https://huggingface.co/laion).
+## Utilisation
 
----
+### 1. Fine‑tuning du modèle enseignant
 
-## Entraînement
-
-### 1. Fine-tuning du modèle enseignant
+Entraînez le teacher (ViT-B-16) sur le dataset marin (Version 2 des captions) :
 
 ```bash
-cd src
 python -m training.main \
     --train-data "csvfiles/train/captions_train_new-2.csv" \
     --val-data "csvfiles/val/captions_val_new-2.csv" \
     --csv-img-key filepath \
     --csv-caption-key caption \
-    --csv-separator , \
-    --data-root /path/to/CLIP-KD/ \
-    --val-data-root /path/to/CLIP-KD/ \
     --model ViT-B-16 \
     --model-checkpoint pretrained_models/ViT_B_16-laion400m_e32.pt \
-    --save-frequency 1 \
-    --zeroshot-frequency 0 \
-    --report-to tensorboard \
-    --warmup 150 \
     --batch-size 8 \
-    --lr 1e-05 \
+    --lr 1e-5 \
     --wd 0.1 \
     --epochs 15 \
-    --workers 1 \
-    --seed 42 \
     --logs "../logs" \
-    --name "ViT_B_16-laion400m_teacher-marine"
+    --name "teacher_marine_final"
 ```
 
-### 2. Distillation du modèle étudiant
+Les meilleures performances sont obtenues à l’époque 13 (loss 0.508, R@1=51.3%).
 
-Configuration optimale identifiée empiriquement (FD + ICL + CKD) :
+### 2. Distillation
+
+Pour distiller le teacher vers un student (par ex. RN50 pré‑entraîné OpenAI) :
 
 ```bash
-cd src
 python -m training.main_kd \
     --train-data "csvfiles/train/captions_train_new-2.csv" \
     --val-data "csvfiles/val/captions_val_new-2.csv" \
     --csv-img-key filepath \
     --csv-caption-key caption \
     --csv-separator , \
-    --data-root /path/to/CLIP-KD/ \
-    --val-data-root /path/to/CLIP-KD/ \
-    --save-frequency 0 \
+    --data-root /Users/ricamouele/Documents/TER/CLIP-KD/ \
+    --val-data-root /Users/ricamouele/Documents/TER/CLIP-KD/ \
+    --save-frequency 20 \
     --zeroshot-frequency 0 \
     --report-to tensorboard \
     --warmup 30 \
     --batch-size 8 \
-    --lr 1e-4 \
+    --lr 1e-04 \
     --wd 0.1 \
     --epochs 30 \
     --workers 1 \
     --seed 42 \
     --logs "../logs" \
-    --name "RN50-KD-Marine" \
+    --name "OPENAI-RN50-CC3M-Distilled-FineTuned-Marine-3" \
     --model RN50 \
-    --model-checkpoint pretrained_models/ViT_B_16_laion400m_kd_RN50_cc3m_12m_ep32.pt \
+    --pretrained openai \
     --t-model ViT-B-16 \
     --t-model-checkpoint pretrained_models/ViT_B_16-laion400m_teacher-marine_e15.pt \
-    --alpha_fd_loss 2000. \
-    --alpha_icl_loss 1. \
     --alpha_ckd_loss 1. \
-    --tag distill-marine
+    --alpha_icl_loss 1. \
+    --alpha_fd_loss 2000. \
+    --tag distill-new
 ```
 
----
+La combinaison `FD + ICL + CKD` avec `alpha_fd=2000` donne les meilleurs résultats.
 
-## Stratégies de distillation disponibles
+### 3. Évaluation zero‑shot
 
-| Stratégie | Flag | Valeur recommandée | Description |
-|---|---|---|---|
-| FD | `--alpha_fd_loss` | `2000.` | MSE sur les features image et texte |
-| MFD | `--alpha_fd_loss --mask_ratio` | `2000. 0.75` | FD avec masquage de patches (75%) |
-| CRD | `--alpha_ckd_loss` | `1.` | KL sur les distributions de similarité |
-| GD | `--alpha_gd_loss` | `1e8` | MSE sur les gradients (coûteux) |
-| ICL | `--alpha_icl_loss` | `1.` | Contrastif croisé student/teacher |
-| AFD | `--alpha_afd_loss` | `1.` | Fusion + projection des features |
-
-Les stratégies sont combinables. La combinaison **FD + ICL + CRD** est la plus performante sur notre dataset.
-
----
-
-## Hyperparamètres clés — adaptations pour le domaine marin
-
-| Paramètre | Valeur standard | Valeur optimale (marin) | Raison |
-|---|---|---|---|
-| `--batch-size` | 128 | **8** | Homogénéité visuelle → faux négatifs |
-| `--lr` (student) | 1e-3 | **1e-4** | Dataset petit, convergence plus douce |
-| `--logit-scale` | 100 | **10** | Images similaires → distribution plus lisse |
-| `--alpha_fd_loss` | 2000 | **2000** | Valeur de référence maintenue |
-| `--warmup` | 10000 | **30–150** | Adapté à 350 images |
-
----
-
-## Visualisation avec TensorBoard
+Testez la généralisation sur 14 espèces non vues (captions générées par VLM) :
 
 ```bash
-tensorboard --logdir logs/
+python -m training.zero_shot_fathomnet_custom_v2 \
+    --model ViT-B-16 \
+    --checkpoint pretrained_models/teacher_marine_epoch13.pt \
+    --csv csvfiles/zero-shot/captions_zero_shot2.csv \
+    --logs ../logs/zero_shot_teacher
 ```
 
----
+Pour évaluer un student :
 
-## Résultats principaux
+```bash
+python -m training.zero_shot_fathomnet_custom_v2 \
+    --model RN50 \
+    --checkpoint pretrained_models/rn50_distilled_student.pt \
+    --csv csvfiles/zero-shot/captions_zero_shot2.csv
+```
 
-### Enseignant vs meilleur étudiant
+## Résultats clés
 
-| Modèle | R@1 I→T | R@10 I→T | R@1 T→I | R@10 T→I | Loss val |
-|---|---|---|---|---|---|
-| Teacher ViT-B/16 (ep. 13) | 51.3% | 97.4% | 43.6% | 100.0% | 0.508 |
-| **Student RN50-KD (ep. 18)** | **25.6%** | **87.2%** | **28.2%** | **82.1%** | **1.462** |
-| Baseline sans distillation | 15.4% | 66.7% | 23.1% | 69.2% | 1.658 |
+### Teacher (ViT-B-16 fine‑tuné)
+- **R@1 (I→T)** : 51.3 %  
+- **R@10 (I→T)** : 97.4 %  
+- **Loss validation** : 0.508 (epoch 13)
 
-> **Note importante :** Ces résultats sont à interpréter avec précaution. Le jeu de validation ne compte que 39 images, ce qui implique une variance élevée des métriques (1 exemple = 2.56% de R@1). Les tendances qualitatives sont fiables, mais les valeurs absolues ne doivent pas être surinterprétées.
+### Student retenu (RN50 pré‑entraîné OpenAI)
+- **R@1 (I→T)** : 25.6 %  
+- **R@5 (I→T)** : 74.4 %  
+- **Loss validation** : 0.837 (epoch 25)
 
----
+### Évaluation zero‑shot (14 espèces)
 
-## Limitations connues
+Le tableau ci-dessous résume les accuracies des quatre modèles testés :
 
-- Dataset de très petite taille (350 train / 39 val) — variance élevée des métriques
-- Évaluation sur le même split pour la validation et la sélection du checkpoint (absence de test set indépendant)
-- Gradient Distillation (GD) non pleinement évaluée faute de ressources GPU
-- Entraînement mono-GPU sur CPU local (MacBook) — temps d'exécution long
+| Modèle | Accuracy |
+|--------|----------|
+| ViT-B-16 LAION-400M (baseline) | 57.1 % (8/14) |
+| ViT-B-16 fine‑tuné marin | **85.7 %** (12/14) |
+| RN50 student (distillé) | 50.0 % (7/14) |
+| RN50 CC3M (non adapté) | 35.7 % (5/14) |
 
----
+#### Détail des prédictions par modèle
 
-## Perspectives
+**1. Modèle baseline (ViT-B-16 LAION-400M, non adapté)**  
+- 8 bonnes réponses, 6 erreurs.  
+- Confusions typiques : *Tarsastrocles verrilli* → *Paralomis* (score 43.0 %), *Sebastes levis* → *Scalicus engyceros* (91.3 %), *Hemicorallium abyssale* → *Sebastolobus* (63.3 %).  
+- Exemple de bonne prédiction : *Deepstaria reticulum* (96.6 %).
 
-- Enrichir le dataset via l'API FathomNet (plusieurs milliers d'images disponibles) ou la génération synthétique par modèles de diffusion
-- Utiliser un teacher plus puissant : ViT-L/14 ou ViT-H/14 sur LAION-2B (OpenCLIP)
-- Adopter la perte SigLIP pour le teacher (+5% R@1 observé sur notre domaine)
-- Explorer MobileCLIP ou TinyCLIP comme architectures étudiantes
-- Implémenter un loss scheduling pour \(\alpha_{\text{FD}}\) dynamique
+**2. Modèle fine‑tuné marin (ViT-B-16 après adaptation)**  
+- 12 bonnes réponses, seules 2 erreurs.  
+- Corrige toutes les confusions de la baseline, sauf *Peribolaster* (confondu avec *Scalicus engyceros* à 71.4 %) et *Gaza* (confondu avec *Deepstaria reticulum* à 97.0 %).  
+- Scores très élevés (>99 %) pour la plupart des bonnes prédictions.
 
----
+**3. Student distillé (RN50 – checkpoint `OPENAI-RN50_Distilled_student.pt`)**  
+- 7 bonnes réponses.  
+- Forte tendance à prédire *Peribolaster* ou *Deepstaria reticulum* comme première hypothèse, avec des scores parfois élevés mais erronés (ex. *Tarsastrocles* → *Peribolaster* à 89.0 %).  
+- Seul modèle (avec le marin) à bien classer *Hemicorallium abyssale*.
+
+**4. RN50 non adapté (CC3M, sans fine‑tuning)**  
+- 5 bonnes réponses seulement.  
+- Confusions massives : *Deepstaria reticulum* → *Bathyraja trachura* (93.8 %), *Paralomis* → *Lophiodes beroe* (63.8 %), *Peribolaster* → *Gaza* (37.7 %), etc.
+
+
+### Expérimentations notables
+- Le **nettoyage du dataset** a fait passer le R@1 de 20.9 % à 46.2 %.
+- La **Version 2 des captions** élimine le *shortcut learning* observé avec la Version 1.
+- Le **batch size réduit à 8** et le **logit scale à 10** améliorent la stabilité.
+- La perte **SigLIP** a donné un R@1 maximum de 56.4 % (gain de +5 points) mais n’a pas été retenue pour la distillation.
+
+## Perspectives d’amélioration
+
+- Augmenter la quantité de données.
+- Utiliser un teacher ou un student plus puissant (ViT-L/14 ou ViT-H/14).
+- Explorer systématiquement la perte SigLIP dans la distillation.
+- Élargir le jeu de test zero‑shot.
 
 ## Références
 
-- **CLIP** : Radford et al., *Learning Transferable Visual Models From Natural Language Supervision*, ICML 2021
-- **CLIP-KD** : Yang et al., *CLIP-KD: An Empirical Study of CLIP Model Distillation*, CVPR 2024
-- **SigLIP** : Zhai et al., *Sigmoid Loss for Language Image Pre-Training*, ICCV 2023
-- **Knowledge Distillation** : Hinton et al., *Distilling the Knowledge in a Neural Network*, NeurIPS 2015
-- **FathomNet** : [fathomnet.org](https://fathomnet.org)
-- **OpenCLIP** : [github.com/mlfoundations/open_clip](https://github.com/mlfoundations/open_clip)
+- Yang et al., *CLIP-KD: An Empirical Study of CLIP Model Distillation*, CVPR 2024.
+- Zhai et al., *Sigmoid Loss for Language Image Pre-Training*, ICCV 2023.
+- FathomNet : [fathomnet.org](https://fathomnet.org/)
+- OpenCLIP : [github.com/mlfoundations/open_clip](https://github.com/mlfoundations/open_clip)
+- Code vers repository de génération des captions : https://github.com/RicaMl/knowledge_distillation_ter.
+
+## Note
+
+Ce code est distribué pour des fins académiques. Les modèles pré‑entraînés appartiennent à leurs auteurs respectifs.
+
+## Auteurs
+
+- Rica Mouele Yandza Itotoba  
+- Azouaou Zouaoui 
